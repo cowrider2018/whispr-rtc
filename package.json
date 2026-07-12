@@ -1,0 +1,12 @@
+{
+  "name": "voice-call",
+  "version": "1.0.0",
+  "description": "1-on-1 WebRTC voice call web app",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

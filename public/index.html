@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>偷聊</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <canvas id="ambient" aria-hidden="true"></canvas>
+
+  <main class="card" id="lobby">
+    <input id="room-input" type="text" placeholder="輸入房間代碼(例如:abc123)" autocomplete="off" />
+    <button id="join-btn" class="primary">加入通話</button>
+    <p class="hint">兩人輸入相同的房間代碼即可通話,或直接開啟含房號的連結</p>
+  </main>
+
+  <section id="call" hidden>
+    <video id="screen-video" autoplay playsinline hidden></video>
+
+    <div id="panel" class="panel">
+      <button id="panel-toggle" class="panel-handle" title="展開/收合設定">
+        <span id="panel-chevron" aria-hidden="true"></span>
+        <span id="status" class="status">連線中…</span>
+      </button>
+
+      <div class="panel-basic">
+        <div class="action-row">
+          <button id="mute-btn" class="action" title="靜音">
+            <span class="ico">🔇</span><span class="lbl">靜音</span>
+          </button>
+          <button id="share-btn" class="action" title="分享螢幕">
+            <span class="ico">🖥️</span><span class="lbl">分享</span>
+          </button>
+          <button id="hangup-btn" class="action danger" title="掛斷">
+            <span class="ico">📞</span><span class="lbl">掛斷</span>
+          </button>
+        </div>
+      </div>
+
+      <div id="panel-more" hidden>
+        <div id="stats" class="stats"></div>
+
+        <div class="controls">
+          <button id="fullscreen-btn">⛶ 全螢幕</button>
+          <button id="copy-link-btn">🔗 複製連結</button>
+        </div>
+
+        <div class="settings">
+          <label class="setting-row">
+            <span>語音音量 <b id="volume-val">100%</b></span>
+            <input type="range" id="volume" min="0" max="100" step="1" value="100" />
+          </label>
+          <label class="setting-row">
+            <span>分享音量 <b id="share-volume-val">100%</b></span>
+            <input type="range" id="share-volume" min="0" max="100" step="1" value="100" />
+          </label>
+
+          <label class="setting-row">
+            <span>分享畫質 <b class="dim">(語音始終優先)</b></span>
+            <select id="share-quality">
+              <option value="720">720p</option>
+              <option value="1080">1080p</option>
+              <option value="1440">1440p</option>
+            </select>
+          </label>
+
+          <label class="setting-row checkbox-row">
+            <input type="checkbox" id="gate-enabled" checked />
+            <span>啟用降噪閘</span>
+            <span id="gate-state" class="gate-state"></span>
+          </label>
+
+          <label class="setting-row">
+            <span>降噪門檻 <b id="threshold-val">-60 dB</b></span>
+            <input type="range" id="threshold" min="-90" max="-10" step="1" value="-60" />
+          </label>
+          <div class="meter" title="麥克風音量(綠 = 閘門開啟)">
+            <div id="meter-fill"></div>
+            <div id="meter-marker"></div>
+          </div>
+
+          <label class="setting-row">
+            <span>尾音保留 <b id="hold-val">500 ms</b></span>
+            <input type="range" id="hold" min="100" max="1500" step="50" value="500" />
+          </label>
+        </div>
+      </div>
+    </div>
+
+    <audio id="remote-audio" autoplay playsinline></audio>
+  </section>
+
+  <script src="js/ambient.js"></script>
+  <script src="js/range-fill.js"></script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
