@@ -8,8 +8,12 @@
     const max = Number(el.max);
     const range = (Number.isFinite(max) ? max : 100) - min;
     const pct = range ? ((Number(el.value) - min) / range) * 100 : 0;
+    const clamped = Math.min(Math.max(pct, 0), 100);
     const target = el.closest('.range-wrap') || el;
-    target.style.setProperty('--fill', `${Math.min(Math.max(pct, 0), 100)}%`);
+    target.style.setProperty('--fill', `${clamped}%`);
+    // When full, round the fill's right edge so it meets the groove's rounded
+    // corner instead of leaving a straight edge short of it.
+    target.classList.toggle('is-full', clamped >= 100);
   };
 
   const enhance = (el) => {

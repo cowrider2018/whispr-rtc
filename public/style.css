@@ -447,6 +447,11 @@ input[type='range']::-moz-range-thumb {
   box-shadow: 0 0 0 0 rgba(125, 176, 240, 0);
   transition: box-shadow 0.2s ease; /* glow fades out in 0.2s on release */
 }
+/* At 100% the straight right edge would stop short of the groove's rounded
+   corner and leave a sliver of empty track; round it to match. */
+.range-wrap.is-full .range-glow {
+  border-radius: 5px;
+}
 /* Pressed: the fill glows and its hard-edged diagonal blocks start flowing. */
 .range-wrap:has(input:active) .range-glow {
   background:
