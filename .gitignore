@@ -4,4 +4,5 @@ ngrok-domain.txt
 ngrok.exe
 ngrok.zip
 .env
+todos.md
 .claude/settings.local.json
