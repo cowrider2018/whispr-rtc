@@ -1,7 +1,28 @@
 // WebRTC voice call logic using the "perfect negotiation" pattern,
 // which safely handles offer collisions between the two peers.
 // Audio flows peer-to-peer; only signaling goes through the server.
+//
+// E2EE layers on top:
+//   - Media rides WebRTC's DTLS-SRTP; the DTLS fingerprint travels inside the
+//     SDP, which the signaling layer HMAC-authenticates, so a malicious relay
+//     cannot MITM the media.
+//   - An ephemeral ECDH handshake (authenticated the same way) yields a shared
+//     master secret mixed with room_secret, from which per-direction ratcheted
+//     chat keys are derived. Text chat is AES-GCM encrypted end-to-end.
 import { ICE_SERVERS } from './ice-config.js';
+import {
+  preferredEcdhAlg,
+  generateEphemeralKeyPair,
+  deriveMaster,
+  initChain,
+  ratchetStep,
+  aesEncrypt,
+  aesDecrypt,
+  toB64url,
+  fromB64url,
+  encodeUtf8,
+  decodeUtf8,
+} from './crypto.mjs';
 
 // Fallback screen video cap so voice always keeps bandwidth headroom;
 // the caller normally passes a per-resolution cap. Voice needs ~40kbps
@@ -20,17 +41,30 @@ export class VoiceCall {
   #makingOffer = false;
   #ignoreOffer = false;
 
+  // E2EE handshake / chat state
+  #roomSecret; // Uint8Array, never leaves the browser
+  #ecdhAlg = null;
+  #ecdhKeyPair = null;
+  #masterReady = false;
+  #sendChain = null;
+  #recvChain = null;
+  #chatChannel = null;
+
   onStateChange = () => {};
   onRemoteStream = () => {};
   onScreenStream = () => {};
   onScreenEnded = () => {};
+  onChatReady = () => {};
+  onChatMessage = () => {};
 
   // audioTransform: optional async (rawStream) => processedStream,
   // e.g. a noise gate. Mute still acts on the raw mic tracks.
-  constructor(signaling, { polite, audioTransform = null }) {
+  // roomSecret: Uint8Array from the URL fragment — root of the E2EE key schedule.
+  constructor(signaling, { polite, audioTransform = null, roomSecret }) {
     this.#signaling = signaling;
     this.#polite = polite;
     this.#audioTransform = audioTransform;
+    this.#roomSecret = roomSecret;
   }
 
   async start() {
@@ -49,6 +83,15 @@ export class VoiceCall {
       : this.#localStream;
 
     this.#pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+
+    // Chat DataChannel: the impolite peer (offerer) creates it so it is part
+    // of the first offer; the polite peer receives it. Payloads are E2EE at
+    // the application layer, independent of the transport.
+    if (!this.#polite) {
+      this.#bindChatChannel(this.#pc.createDataChannel('chat'));
+    } else {
+      this.#pc.ondatachannel = ({ channel }) => this.#bindChatChannel(channel);
+    }
 
     for (const track of sendStream.getTracks()) {
       const sender = this.#pc.addTrack(track, sendStream);
@@ -87,9 +130,109 @@ export class VoiceCall {
     };
 
     this.#signaling.on('signal', ({ data }) => this.#handleSignal(data));
+
+    // Kick off the ECDH handshake in parallel with media negotiation.
+    await this.#startHandshake();
   }
 
-  async #handleSignal({ description, candidate }) {
+  // --- E2EE key handshake ---
+
+  async #startHandshake() {
+    this.#ecdhAlg = await preferredEcdhAlg();
+    this.#ecdhKeyPair = await generateEphemeralKeyPair(this.#ecdhAlg);
+    this.#sendPublicKey();
+  }
+
+  #sendPublicKey() {
+    this.#signaling.sendSignal({
+      handshake: {
+        alg: this.#ecdhAlg,
+        pub: toB64url(this.#ecdhKeyPair.publicKeyRaw),
+      },
+    });
+  }
+
+  async #handleHandshake({ alg, pub }) {
+    if (this.#masterReady) return; // ignore duplicate/late handshakes
+
+    // Cross-browser negotiation: P-256 is the universal floor. If peers differ,
+    // only the X25519 side downgrades to P-256 and resends; this converges in
+    // one extra step without looping (no one ever upgrades).
+    if (alg !== this.#ecdhAlg) {
+      if (this.#ecdhAlg === 'X25519') {
+        this.#ecdhAlg = 'P-256';
+        this.#ecdhKeyPair = await generateEphemeralKeyPair('P-256');
+        this.#sendPublicKey();
+        // peer is already on P-256; derive against their key now
+      } else {
+        return; // we are P-256; wait for their downgraded key
+      }
+    }
+
+    const master = await deriveMaster(
+      this.#ecdhKeyPair.privateKey,
+      fromB64url(pub),
+      this.#ecdhAlg,
+      this.#roomSecret
+    );
+    await this.#setupChat(master);
+  }
+
+  // Two independent ratchet chains keyed off the shared master; the label
+  // pairing guarantees each peer's send chain matches the other's recv chain.
+  async #setupChat(master) {
+    const sendLabel = this.#polite ? 'p2i' : 'i2p';
+    const recvLabel = this.#polite ? 'i2p' : 'p2i';
+    this.#sendChain = await initChain(master, sendLabel);
+    this.#recvChain = await initChain(master, recvLabel);
+    this.#masterReady = true;
+    if (this.#chatChannel?.readyState === 'open') this.onChatReady();
+  }
+
+  #bindChatChannel(channel) {
+    this.#chatChannel = channel;
+    channel.onopen = () => {
+      if (this.#masterReady) this.onChatReady();
+    };
+    channel.onmessage = (e) => this.#receiveChat(e.data);
+  }
+
+  // Advance the send ratchet, AES-GCM encrypt, and ship ciphertext only.
+  async sendChat(text) {
+    if (!this.#masterReady || this.#chatChannel?.readyState !== 'open') return false;
+    const { messageKey, nextChainKey } = await ratchetStep(this.#sendChain);
+    this.#sendChain = nextChainKey;
+    const { iv, ct } = await aesEncrypt(messageKey, encodeUtf8(text));
+    this.#chatChannel.send(
+      JSON.stringify({ iv: toB64url(iv), ct: toB64url(ct) })
+    );
+    return true;
+  }
+
+  async #receiveChat(raw) {
+    if (!this.#masterReady) return;
+    let env;
+    try {
+      env = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    const { messageKey, nextChainKey } = await ratchetStep(this.#recvChain);
+    this.#recvChain = nextChainKey;
+    try {
+      const pt = await aesDecrypt(
+        messageKey,
+        fromB64url(env.iv),
+        fromB64url(env.ct)
+      );
+      this.onChatMessage(decodeUtf8(pt));
+    } catch {
+      // GCM tag mismatch — tampered or out-of-sync; drop silently.
+    }
+  }
+
+  async #handleSignal({ description, candidate, handshake }) {
+    if (handshake) return this.#handleHandshake(handshake);
     if (description) {
       const offerCollision =
         description.type === 'offer' &&
@@ -195,6 +338,16 @@ export class VoiceCall {
   hangup() {
     this.#screenSenders = [];
     this.#micSender = null;
+    try {
+      this.#chatChannel?.close();
+    } catch {
+      // already closing/closed
+    }
+    this.#chatChannel = null;
+    this.#sendChain = null;
+    this.#recvChain = null;
+    this.#masterReady = false;
+    this.#ecdhKeyPair = null;
     this.#pc?.close();
     this.#pc = null;
     for (const track of this.#localStream?.getTracks() ?? []) {

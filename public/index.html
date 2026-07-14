@@ -10,9 +10,9 @@
   <canvas id="ambient" aria-hidden="true"></canvas>
 
   <main class="card" id="lobby">
-    <input id="room-input" type="text" placeholder="輸入房間代碼(例如:abc123)" autocomplete="off" />
-    <button id="join-btn" class="primary">加入通話</button>
-    <p class="hint">兩人輸入相同的房間代碼即可通話,或直接開啟含房號的連結</p>
+    <input id="room-input" type="text" placeholder="貼上邀請連結,或留空以建立加密房間" autocomplete="off" />
+    <button id="join-btn" class="primary">建立 / 加入加密房間</button>
+    <p class="hint">留空並按下按鈕即可建立加密房間,再用「複製連結」把邀請傳給對方</p>
   </main>
 
   <section id="call" hidden>
@@ -44,6 +44,18 @@
         <div class="controls">
           <button id="fullscreen-btn">⛶ 全螢幕</button>
           <button id="copy-link-btn">🔗 複製連結</button>
+        </div>
+
+        <div id="chat" class="chat">
+          <div class="chat-head">
+            <span>加密聊天</span>
+            <span id="chat-status" class="chat-status">建立加密通道中…</span>
+          </div>
+          <div id="chat-log" class="chat-log"></div>
+          <div class="chat-input-row">
+            <input id="chat-input" type="text" placeholder="輸入訊息…" autocomplete="off" disabled />
+            <button id="chat-send" disabled>送出</button>
+          </div>
         </div>
 
         <div class="settings">

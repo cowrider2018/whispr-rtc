@@ -4,12 +4,18 @@ import { SignalingChannel } from './signaling.js';
 import { VoiceCall } from './call.js';
 import { NoiseGate } from './noise-gate.js';
 import { captureScreen, applyQuality, qualityFor } from './screen-share.js';
+import { generateRoomCredentials, fromB64url, deriveAuthKey } from './crypto.mjs';
 
 const lobby = document.getElementById('lobby');
 const callSection = document.getElementById('call');
 const roomInput = document.getElementById('room-input');
 const joinBtn = document.getElementById('join-btn');
 const hintEl = document.querySelector('.hint');
+
+const chatLog = document.getElementById('chat-log');
+const chatInput = document.getElementById('chat-input');
+const chatSend = document.getElementById('chat-send');
+const chatStatus = document.getElementById('chat-status');
 
 const panel = document.getElementById('panel');
 const panelToggle = document.getElementById('panel-toggle');
@@ -49,7 +55,7 @@ const METER_MIN_DB = -90;
 const METER_MAX_DB = -10;
 const SETTINGS_KEY = 'voice-call-settings-v2';
 const PANEL_HIDE_MS = 4000;
-const DEFAULT_HINT = '兩人輸入相同的房間代碼即可通話,或直接開啟含房號的連結';
+const DEFAULT_HINT = '留空並按下按鈕即可建立加密房間,再用「複製連結」把邀請傳給對方';
 
 let signaling = null;
 let call = null;
@@ -71,9 +77,14 @@ const STATE_TEXT = {
 
 // --- Event wiring ---
 
-joinBtn.addEventListener('click', join);
+joinBtn.addEventListener('click', onJoinClick);
 roomInput.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') join();
+  if (e.key === 'Enter') onJoinClick();
+});
+
+chatSend.addEventListener('click', sendChatMessage);
+chatInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendChatMessage();
 });
 muteBtn.addEventListener('click', toggleMute);
 hangupBtn.addEventListener('click', endCall);
@@ -141,26 +152,64 @@ shareQualityEl.addEventListener('change', async () => {
 
 loadSettings();
 
-// Auto-join when the URL carries a room code (?room=xxx):
-// the lobby is skipped entirely.
-const urlRoom = new URLSearchParams(location.search).get('room')?.trim();
-if (urlRoom) {
-  roomInput.value = urlRoom;
-  join();
+// Auto-join when the URL carries a full invite (?room=<id>#<secret>):
+// the lobby is skipped entirely. The secret lives in the fragment and is
+// never sent to the server.
+const invite = parseInvite(location.href);
+if (invite) {
+  join(invite.roomId, invite.secret);
 }
 
 // --- Join / call lifecycle ---
 
-async function join() {
+// Extract { roomId, secret } from a URL, or null if it isn't a full invite.
+// room id comes from ?room=; the 256-bit secret from the #fragment.
+function parseInvite(href) {
+  let u;
+  try {
+    u = new URL(href);
+  } catch {
+    return null;
+  }
+  const roomId = new URLSearchParams(u.search).get('room')?.trim();
+  const secret = u.hash.startsWith('#') ? u.hash.slice(1).trim() : '';
+  return roomId && secret ? { roomId, secret } : null;
+}
+
+// Lobby button: paste an invite link to join, or leave empty to create a new
+// encrypted room. A bare code can't carry a secret, so E2EE requires the link.
+function onJoinClick() {
   if (joined) return;
-  const room = roomInput.value.trim();
-  if (!room) return;
+  const val = roomInput.value.trim();
+  if (!val) {
+    const { roomId, roomSecret } = generateRoomCredentials();
+    join(roomId, roomSecret);
+    return;
+  }
+  const invite = parseInvite(val);
+  if (invite) {
+    join(invite.roomId, invite.secret);
+    return;
+  }
+  hintEl.textContent = '請貼上完整邀請連結,或清空欄位以建立新的加密房間';
+}
+
+async function join(roomId, secretB64) {
+  if (joined) return;
+  if (!roomId || !secretB64) return;
   joined = true;
   hintEl.textContent = DEFAULT_HINT;
 
-  // Carry the room code in the URL so the link can be shared and
-  // a refresh rejoins the same room.
-  history.replaceState(null, '', `${location.pathname}?room=${encodeURIComponent(room)}`);
+  const roomSecret = fromB64url(secretB64);
+  const authKey = await deriveAuthKey(roomSecret);
+
+  // Carry the full invite (id + fragment secret) in the URL so "copy link"
+  // shares everything the peer needs, and a refresh rejoins the same room.
+  history.replaceState(
+    null,
+    '',
+    `${location.pathname}?room=${encodeURIComponent(roomId)}#${secretB64}`
+  );
 
   lobby.hidden = true;
   callSection.hidden = false;
@@ -168,10 +217,19 @@ async function join() {
   statusEl.textContent = '等待對方加入…';
 
   signaling = new SignalingChannel();
+  signaling.setAuthKey(authKey);
 
   signaling.on('room-full', () => {
     endCall();
     hintEl.textContent = '❌ 房間已滿(僅限 2 人),請稍後再試';
+  });
+
+  // A failed MAC means the relay (or someone on the path) tampered with a
+  // signaling message. room_secret authenticates every signal, so this should
+  // never happen in a healthy call — treat it as a security event.
+  signaling.on('auth-fail', () => {
+    statusEl.textContent = '⛔ 偵測到訊息遭竄改,已中止連線';
+    setChatEnabled(false);
   });
 
   signaling.on('joined', async ({ peerCount }) => {
@@ -184,6 +242,7 @@ async function join() {
 
     call = new VoiceCall(signaling, {
       polite,
+      roomSecret,
       audioTransform: async (rawStream) => {
         const processed = await gate.process(rawStream);
         gate.setEnabled(gateEnabledEl.checked);
@@ -193,6 +252,8 @@ async function join() {
       },
     });
 
+    call.onChatReady = () => setChatEnabled(true);
+    call.onChatMessage = (text) => appendChat(text, 'peer');
     call.onRemoteStream = (stream) => {
       remoteAudio.srcObject = stream;
       applyVolume();
@@ -228,7 +289,7 @@ async function join() {
     if (!callSection.hidden) statusEl.textContent = '⚠️ 信令伺服器連線中斷';
   });
 
-  signaling.connect(room);
+  signaling.connect(roomId);
 }
 
 // Tear down the call and return to the lobby. The room input keeps
@@ -245,6 +306,9 @@ function endCall() {
   signaling = null;
   remoteAudio.srcObject = null;
   hideScreenVideo();
+  setChatEnabled(false);
+  chatLog.innerHTML = '';
+  chatInput.value = '';
   statsEl.textContent = '';
   meterFill.style.width = '0%';
   gateStateEl.textContent = '';
@@ -402,4 +466,30 @@ function toggleMute() {
   muteIco.textContent = muted ? '🎤' : '🔇';
   muteLbl.textContent = muted ? '解除' : '靜音';
   muteBtn.classList.toggle('active', muted);
+}
+
+// --- Encrypted chat ---
+
+function setChatEnabled(on) {
+  chatInput.disabled = !on;
+  chatSend.disabled = !on;
+  chatStatus.textContent = on ? '🔒 端到端加密' : '建立加密通道中…';
+}
+
+async function sendChatMessage() {
+  const text = chatInput.value.trim();
+  if (!text || !call) return;
+  const sent = await call.sendChat(text);
+  if (sent) {
+    appendChat(text, 'me');
+    chatInput.value = '';
+  }
+}
+
+function appendChat(text, who) {
+  const line = document.createElement('div');
+  line.className = `chat-msg ${who}`;
+  line.textContent = text;
+  chatLog.appendChild(line);
+  chatLog.scrollTop = chatLog.scrollHeight;
 }
