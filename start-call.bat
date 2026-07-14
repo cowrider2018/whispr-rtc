@@ -1,27 +1,22 @@
 @echo off
-rem Start the voice call service in a single window:
+rem Start the voice call service:
 rem   - node server runs hidden (no console window)
-rem   - ngrok runs right here; this window becomes "voice-call-tunnel"
+rem   - ngrok runs hidden; this window prints the public URL to share
 rem
-rem One-time setup:
-rem   1. Paste your authtoken into ngrok.yml (this folder).
-rem      Get it at: https://dashboard.ngrok.com/get-started/your-authtoken
-rem   2. (Optional) Claim a free static domain at https://dashboard.ngrok.com/domains
-rem      and put it on the first line of ngrok-domain.txt (this folder).
-rem      Both ngrok.yml and ngrok-domain.txt are gitignored, so your token
-rem      and personal URL never land in the repo.
+rem One-time setup: copy .env.example to .env and paste your NGROK_AUTHTOKEN.
+rem   Get it at https://dashboard.ngrok.com/get-started/your-authtoken
+rem   Nothing else to configure - the public URL is read back from ngrok.
 title voice-call-tunnel
 cd /d "%~dp0"
 
-rem Read the fixed domain from an untracked file so it stays out of git.
-set "NGROK_DOMAIN="
-if exist "ngrok-domain.txt" set /p NGROK_DOMAIN=<ngrok-domain.txt
+rem Load config from .env (only NGROK_AUTHTOKEN is required; # lines skipped).
+rem ngrok reads NGROK_AUTHTOKEN from the environment automatically.
+if exist ".env" for /f "usebackq eol=# tokens=1,* delims==" %%a in (".env") do set "%%a=%%b"
 
-findstr /C:"PASTE_YOUR_AUTHTOKEN_HERE" ngrok.yml >nul 2>&1
-if %errorlevel%==0 (
-    echo [ERROR] ngrok.yml still contains the placeholder authtoken.
-    echo Get yours at https://dashboard.ngrok.com/get-started/your-authtoken
-    echo paste it into ngrok.yml, then run this script again.
+if "%NGROK_AUTHTOKEN%"=="" (
+    echo [ERROR] NGROK_AUTHTOKEN is not set.
+    echo Copy .env.example to .env and paste your ngrok authtoken.
+    echo Get it at https://dashboard.ngrok.com/get-started/your-authtoken
     pause
     exit /b 1
 )
@@ -39,16 +34,16 @@ if %errorlevel%==0 (
     powershell -NoProfile -Command "Start-Process node -ArgumentList 'server.js' -WindowStyle Hidden"
 )
 
+rem Optional fixed domain; otherwise ngrok assigns one from your account/token.
+set "NGROK_ARGS=http 3000 --log stdout"
+if not "%NGROK_DOMAIN%"=="" set "NGROK_ARGS=%NGROK_ARGS% --domain %NGROK_DOMAIN%"
+echo Starting tunnel...
+powershell -NoProfile -Command "Start-Process ngrok -ArgumentList '%NGROK_ARGS%' -WindowStyle Hidden"
+
+rem Derive the public URL from ngrok's local API (no domain to configure).
+echo Reading public URL from ngrok...
+powershell -NoProfile -Command "$u=$null; for($i=0;$i -lt 30 -and -not $u;$i++){try{$u=((Invoke-RestMethod http://127.0.0.1:4040/api/tunnels).tunnels | ?{$_.proto -eq 'https'})[0].public_url}catch{}; if(-not $u){Start-Sleep -Milliseconds 700}}; if($u){Write-Host ''; Write-Host ('  Share this link:  ' + $u); Write-Host ''}else{Write-Host 'Could not read tunnel URL - open http://127.0.0.1:4040 to see it.'}"
+
 echo.
-if "%NGROK_DOMAIN%"=="" (
-    echo No ngrok-domain.txt found - starting with a random URL.
-    echo For a fixed URL: claim a free domain at https://dashboard.ngrok.com/domains
-    echo and put it on the first line of ngrok-domain.txt in this folder.
-    echo.
-    ngrok http 3000 --config ngrok.yml
-) else (
-    echo Fixed URL: https://%NGROK_DOMAIN%
-    echo Run stop-call.bat to stop everything, or press Ctrl+C here.
-    echo.
-    ngrok http 3000 --config ngrok.yml --domain %NGROK_DOMAIN%
-)
+echo Tunnel + server run in the background. Run stop-call.bat to stop everything.
+pause

@@ -1,4 +1,5 @@
 node_modules/
 ngrok.yml
 ngrok-domain.txt
+.env
 .claude/settings.local.json
